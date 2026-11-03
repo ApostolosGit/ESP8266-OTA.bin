@@ -127,6 +127,11 @@ jobs:
               global s
               assert s.count(old)==1, f'Verifier anchor not unique: {old}'
               s=s.replace(old,new)
+          sub('ACTIVE_VERSION = "6.00"','ACTIVE_VERSION = "7.0"')
+          sub('assert fields["platform_version"] == "1.00"','assert fields["platform_version"] == "1.05"')
+          sub('assert re.fullmatch(r"[0-9a-f]{40}", fields["build"]), f"{manifest}: invalid source commit"',
+              'assert fields["channel"] == "PUBLIC_OTA" and fields["hardware_validation"] == "UNVERIFIED", f"{manifest}: incorrect release channel"')
+          sub('active_builds.add(fields["build"])','active_builds.add(fields["source_sha256"])')
           sub('VENTILATION_VERSION = "2.04"','VENTILATION_VERSION = "7.10"')
           sub('fields["file"] == "Ventilation_ESP8266_V2_04.bin"','fields["file"] == "Ventilation_ESP8266_V7_10.bin"')
           sub('"platform_version": "1.04", "driver": "DS18B20-DHT11"','"platform_version": "1.06", "driver": "DS18B20-DHT11"')
@@ -139,6 +144,16 @@ jobs:
               global s
               assert s.count(old)==1, f'Test anchor not unique: {old}'
               s=s.replace(old,new)
+          tsub('(self.root / "EnergyMeter_DDS238_SSD1309_Ver6_00_test.bin")',
+               '(self.root / "EnergyMeter_DDS238_SSD1309_Ver7_0_test.bin")')
+          tsub('"version": "6.00", "file": "EnergyMeter_DDS238_SSD1309_Ver6_00_test.bin"',
+               '"version": "7.0", "file": "EnergyMeter_DDS238_SSD1309_Ver7_0_test.bin"')
+          tsub('"platform_version": "1.00", "driver": "DDS238"',
+               '"platform_version": "1.05", "driver": "DDS238"')
+          tsub('"profile": "energymeter-dds238-ssd1309", "ota_protocol": "2", "build": "a" * 40,',
+               '"profile": "energymeter-dds238-ssd1309", "ota_protocol": "2", "channel": "PUBLIC_OTA", "hardware_validation": "UNVERIFIED",')
+          tsub('("application", "platform"), ("build", "short"),',
+               '("application", "platform"), ("channel", "TEST_OTA"),')
           tsub('"version": "2.02", "file": "Ventilation_ESP8266_V2_02.bin"','"version": "7.10", "file": "Ventilation_ESP8266_V7_10.bin"')
           tsub('"platform_version": "1.03", "driver": "DS18B20-DHT11"','"platform_version": "1.06", "driver": "DS18B20-DHT11"')
           tsub('"credentials": "LittleFS-migration-or-setup-portal",','"credentials": "LittleFS-or-setup-portal",')
