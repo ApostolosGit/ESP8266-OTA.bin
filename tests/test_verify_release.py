@@ -28,14 +28,14 @@ class ReleaseChecks(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.image = b"\xe9" + bytes(range(256)) * 32
-        (self.root / "EnergyMeter_DDS238_SSD1309_Ver6_00_test.bin").write_bytes(self.image)
+        (self.root / "EnergyMeter_DDS238_SSD1309_Ver7_0_test.bin").write_bytes(self.image)
         self.fields = {
-            "version": "6.00", "file": "EnergyMeter_DDS238_SSD1309_Ver6_00_test.bin",
+            "version": "7.0", "file": "EnergyMeter_DDS238_SSD1309_Ver7_0_test.bin",
             "size": str(len(self.image)), "md5": hashlib.md5(self.image).hexdigest(),
             "meter": "DDS238", "oled": "SSD1309", "core": "ESP8266-2.7.2",
             "credentials": "LittleFS-or-setup-portal", "transport": "https-range",
-            "application": "energymeter", "platform_version": "1.00", "driver": "DDS238",
-            "profile": "energymeter-dds238-ssd1309", "ota_protocol": "2", "build": "a" * 40,
+            "application": "energymeter", "platform_version": "1.05", "driver": "DDS238",
+            "profile": "energymeter-dds238-ssd1309", "ota_protocol": "2", "channel": "PUBLIC_OTA", "hardware_validation": "UNVERIFIED",
             "source_sha256": "b" * 64, "sha256": hashlib.sha256(self.image).hexdigest(),
         }
 
@@ -54,7 +54,7 @@ class ReleaseChecks(unittest.TestCase):
     def test_wrong_driver_display_profile_or_protocol_rejected(self):
         for key, value in (("driver", "JSY-MK333"), ("oled", "NONE"),
                            ("profile", "energymeter-dds238-none"), ("ota_protocol", "1"),
-                           ("application", "platform"), ("build", "short"),
+                           ("application", "platform"), ("channel", "TEST_OTA"),
                            ("source_sha256", "invalid"), ("sha256", "0" * 64)):
             with self.subTest(key=key):
                 previous = self.fields[key]
@@ -95,16 +95,16 @@ class VentilationChecks(unittest.TestCase):
         self.root = Path(directory.name)
         self.image = b"\xe9" + bytes(range(256)) * 64
         self.fields = {
-            "version": "2.02", "file": "Ventilation_ESP8266_V2_02.bin",
+            "version": "7.10", "file": "Ventilation_ESP8266_V7_10.bin",
             "size": str(len(self.image)), "md5": hashlib.md5(self.image).hexdigest(),
             "sha256": hashlib.sha256(self.image).hexdigest(),
             "meter": "VENTILATION", "application": "ventilation",
-            "platform_version": "1.03", "driver": "DS18B20-DHT11", "oled": "NONE",
+            "platform_version": "1.06", "driver": "DS18B20-DHT11", "oled": "NONE",
             "profile": release.VENTILATION_PROFILE, "ota_protocol": "2",
             "core": "ESP8266-2.7.2", "transport": "https-range",
-            "credentials": "LittleFS-migration-or-setup-portal", "build": "c" * 40,
+            "credentials": "LittleFS-or-setup-portal", "build": "c" * 40,
             "source_sha256": "d" * 64, "hardware_validation": "UNVERIFIED",
-            "requires": "Ventilation-1.04+", "local_ip": "192.168.1.81",
+            "channel": "PUBLIC_OTA",
         }
         (self.root / self.fields["file"]).write_bytes(self.image)
 
@@ -124,7 +124,7 @@ class VentilationChecks(unittest.TestCase):
         for key, value in (("version", "1.08"), ("version", "2.00"), ("platform_version", "1.01"), ("meter", "DDS238"),
                            ("application", "energymeter"), ("driver", "DDS238"),
                            ("oled", "SSD1309"), ("profile", "ventilation-none"),
-                           ("ota_protocol", "1"), ("local_ip", "192.168.1.80"),
+                           ("ota_protocol", "1"), ("channel", "TEST_OTA"),
                            ("source_sha256", "invalid"), ("build", "pending"),
                            ("hardware_validation", "VERIFIED")):
             with self.subTest(key=key):
@@ -136,7 +136,7 @@ class VentilationChecks(unittest.TestCase):
 
     def test_legacy_filename_and_corrupt_bytes_rejected(self):
         previous = self.fields["file"]
-        self.fields["file"] = "Ventilation_ESP8266_V2_02_source.bin"
+        self.fields["file"] = "Ventilation_ESP8266_V7_10_source.bin"
         with self.assertRaisesRegex(AssertionError, "allowlist"):
             self.validate()
         self.fields["file"] = previous

@@ -14,8 +14,8 @@ PROFILES = {
     "manifest-dds-sh1106.txt": ("DDS238", "SH1106"),
     "manifest-jsy-sh1106.txt": ("JSY-MK333", "SH1106"),
 }
-ACTIVE_VERSION = "6.00"
-VENTILATION_VERSION = "2.04"
+ACTIVE_VERSION = "7.0"
+VENTILATION_VERSION = "7.10"
 VENTILATION_PROFILE = "ventilation-3ds18b20-2dht11-none"
 HISTORICAL_MANIFEST_SHA256 = {
     "manifest-dds-sh1106.txt": "ecf1b3f12587383008e100ea3676ee45c4ff3f66e3006a60d40cd8d15cd41fa2",
@@ -70,12 +70,12 @@ def validate_manifest(manifest, content):
     if profile[1] == "SSD1309":
         assert fields["version"] == ACTIVE_VERSION, f"{manifest}: wrong active version"
         assert fields["application"] == "energymeter"
-        assert fields["platform_version"] == "1.00"
+        assert fields["platform_version"] == "1.05"
         assert fields["driver"] == profile[0]
         expected = "energymeter-" + profile[0].lower() + "-ssd1309"
         assert fields["profile"] == expected, f"{manifest}: wrong OTA profile identity"
         assert fields["ota_protocol"] == "2"
-        assert re.fullmatch(r"[0-9a-f]{40}", fields["build"]), f"{manifest}: invalid source commit"
+        assert fields["channel"] == "PUBLIC_OTA" and fields["hardware_validation"] == "UNVERIFIED", f"{manifest}: incorrect release channel"
         assert re.fullmatch(r"[0-9a-f]{64}", fields["source_sha256"]), f"{manifest}: invalid source digest"
         assert hashlib.sha256(image).hexdigest() == fields["sha256"], f"{path}: SHA256 mismatch"
     else:
@@ -87,15 +87,14 @@ def validate_manifest(manifest, content):
 def validate_ventilation_manifest(content):
     fields = parse_manifest(content)
     assert fields["version"] == VENTILATION_VERSION
-    assert fields["file"] == "Ventilation_ESP8266_V2_04.bin", "Legacy Ventilation URL allowlist requires the exact versioned filename"
+    assert fields["file"] == "Ventilation_ESP8266_V7_10.bin", "Legacy Ventilation URL allowlist requires the exact versioned filename"
     for key, expected in {
         "meter": "VENTILATION", "application": "ventilation",
-        "platform_version": "1.04", "driver": "DS18B20-DHT11",
+        "platform_version": "1.06", "driver": "DS18B20-DHT11",
         "oled": "NONE", "profile": VENTILATION_PROFILE, "ota_protocol": "2",
         "core": "ESP8266-2.7.2", "transport": "https-range",
-        "credentials": "LittleFS-migration-or-setup-portal",
-        "hardware_validation": "UNVERIFIED", "requires": "Ventilation-1.04+",
-        "local_ip": "192.168.1.81",
+        "credentials": "LittleFS-or-setup-portal",
+        "hardware_validation": "UNVERIFIED", "channel": "PUBLIC_OTA",
     }.items():
         assert fields[key] == expected, f"Ventilation: invalid {key}"
     assert re.fullmatch(r"[0-9a-f]{40}", fields["build"]), "Ventilation: invalid source commit"
@@ -127,7 +126,7 @@ def check(remote=False):
         content = (ROOT / manifest).read_bytes()
         fields, image = validate_manifest(manifest, content)
         if profile[1] == "SSD1309":
-            active_builds.add(fields["build"])
+            active_builds.add(fields["source_sha256"])
         path = fields["file"]
         if remote:
             verify_remote_image(manifest, content, fields, image)
