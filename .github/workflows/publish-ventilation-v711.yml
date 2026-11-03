@@ -1,0 +1,173 @@
+name: Publish Ventilation v7.11 offline-first OTA for MQTT.app
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-ventilation-v711.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout public OTA repository
+        uses: actions/checkout@v4
+      - name: Checkout pinned Ventilation v7.11 source
+        uses: actions/checkout@v4
+        with:
+          repository: ApostolosGit/ESP8266
+          ref: 9165bcfec7a592ce8ab778c97219f25da2543d17
+          path: source
+          persist-credentials: false
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+      - name: Install pinned ESP8266 2.7.2 and libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          IDX=https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index --additional-urls "$IDX"
+          arduino-cli core install "esp8266:esp8266@2.7.2" --additional-urls "$IDX"
+          arduino-cli lib install "OneWire"
+          arduino-cli lib install "DallasTemperature"
+          arduino-cli lib install "DHT sensor library"
+          mkdir -p "$HOME/Arduino/libraries"
+          git clone --quiet --depth 1 https://github.com/beegee-tokyo/DHTesp.git "$HOME/Arduino/libraries/DHTesp"
+          arduino-cli lib install "PubSubClient"
+      - name: Validate source and OTA compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path("source/Ventilation/ESP8266_ventilation_v7.11_offline_first_TEST.ino")
+          s=src.read_text()
+          required=(
+              '#define VERSION "7.11"',
+              '#define PLATFORM_VERSION "1.06"',
+              '#define OLED_TYPE 0',
+              '#define PLATFORM_LOCAL_CONTROL_APPLICATION 1',
+              '#define OTA_PROFILE_PREFIX "ventilation-3ds18b20-2dht11"',
+              '#define OTA_PROTOCOL_VERSION 2',
+              'void applicationPrepareOta()',
+              'void applicationEarlyInitialize()',
+              'void applicationServiceLocal(unsigned long now)',
+              'ds.setWaitForConversion(false)',
+              'WiFi.setSleepMode(WIFI_NONE_SLEEP)',
+              'MQTT_TRANSPORT_COOLDOWN_MS = 60000UL',
+              'CRASH_STAGE_MQTT_TLS_RETURN',
+          )
+          for item in required:
+              assert item in s, f"Missing invariant: {item}"
+          a=s.index("bool serviceNetworkStackRecovery(unsigned long now) {")
+          b=s.index("void serviceWiFiReconnect(unsigned long now) {", a)
+          for forbidden in ("server.stop()", "WiFi.disconnect(", "WiFi.mode(WIFI_OFF)", "ESP.restart()"):
+              assert forbidden not in s[a:b], f"Risky MQTT recovery action: {forbidden}"
+          a=s.index("void loop() {")
+          b=s.index("// END MODULE: MAIN SETUP / LOOP",a)
+          assert s[a:b].index("applicationServiceLocal(now);") < s[a:b].index("serviceNetworkPriority(millis());")
+          old=dict(line.split('=',1) for line in Path('manifest-ventilation.txt').read_text().splitlines() if '=' in line)
+          assert old['version'] in ('7.10','7.11'), 'Unexpected older release; stop'
+          assert old['profile']=='ventilation-3ds18b20-2dht11-none', 'Profile mismatch; stop'
+          assert old['file'] in ('Ventilation_ESP8266_V7_10.bin','Ventilation_ESP8266_V7_11.bin')
+          print("SOURCE_OTA_PROFILE_AND_OFFLINE_FIRST=PASS")
+          PY
+      - name: Compile image and require exact verified candidate SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ESP8266_ventilation_v7_11_offline_first_TEST" "$RUNNER_TEMP/compiled"
+          cp source/Ventilation/ESP8266_ventilation_v7.11_offline_first_TEST.ino \
+            "$RUNNER_TEMP/ESP8266_ventilation_v7_11_offline_first_TEST/ESP8266_ventilation_v7_11_offline_first_TEST.ino"
+          arduino-cli compile \
+            --fqbn "esp8266:esp8266:nodemcuv2:eesz=4M2M" \
+            --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json \
+            --output-dir "$RUNNER_TEMP/compiled" \
+            "$RUNNER_TEMP/ESP8266_ventilation_v7_11_offline_first_TEST"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,os
+          p=Path(os.environ['RUNNER_TEMP'])/'compiled/ESP8266_ventilation_v7_11_offline_first_TEST.ino.bin'
+          b=p.read_bytes()
+          assert b[:1]==b'\xe9', 'Not an ESP8266 firmware image'
+          assert len(b)==591072, f'Unexpected BIN size: {len(b)}'
+          assert hashlib.md5(b).hexdigest()=='37204c94a4d9c41f914bbf40dcd53d61', 'BIN MD5 mismatch'
+          assert hashlib.sha256(b).hexdigest()=='91f448e3562100f7b100c2d1bd4721c1646d8b7009ab8c250eeb2219487ad946', 'BIN SHA256 mismatch'
+          Path('Ventilation_ESP8266_V7_11.bin').write_bytes(b)
+          print("EXACT_TESTED_BUILD=PASS",len(b),hashlib.sha256(b).hexdigest())
+          PY
+      - name: Write v7.11 manifest, preserve all EnergyMeter manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          path='Ventilation_ESP8266_V7_11.bin'
+          image=Path(path).read_bytes()
+          source=Path('source/Ventilation/ESP8266_ventilation_v7.11_offline_first_TEST.ino').read_bytes()
+          metadata={
+              'version':'7.11',
+              'file':path,
+              'size':str(len(image)),
+              'md5':hashlib.md5(image).hexdigest(),
+              'meter':'VENTILATION',
+              'oled':'NONE',
+              'core':'ESP8266-2.7.2',
+              'channel':'PUBLIC_OTA',
+              'hardware_validation':'UNVERIFIED',
+              'sha256':hashlib.sha256(image).hexdigest(),
+              'source_sha256':hashlib.sha256(source).hexdigest(),
+              'build':'9165bcfec7a592ce8ab778c97219f25da2543d17',
+              'application':'ventilation',
+              'platform_version':'1.06',
+              'driver':'DS18B20-DHT11',
+              'profile':'ventilation-3ds18b20-2dht11-none',
+              'ota_protocol':'2',
+              'transport':'https-range',
+              'credentials':'LittleFS-or-setup-portal',
+          }
+          Path('manifest-ventilation.txt').write_text(''.join(f'{key}={value}\n' for key,value in metadata.items()))
+          for filename in ('tests/verify_release.py','tests/test_verify_release.py'):
+              p=Path(filename)
+              s=p.read_text()
+              pairs={
+                  'VENTILATION_VERSION = "7.10"':'VENTILATION_VERSION = "7.11"',
+                  'Ventilation_ESP8266_V7_10.bin':'Ventilation_ESP8266_V7_11.bin',
+                  'Ventilation_ESP8266_V7_10_source.bin':'Ventilation_ESP8266_V7_11_source.bin',
+                  '"version": "7.10"':'"version": "7.11"',
+              }
+              for before,after in pairs.items():
+                  if before not in s:
+                      continue
+                  s=s.replace(before,after)
+              p.write_text(s)
+          print("MANIFEST_VERSION_7_11=PASS")
+          PY
+      - name: Run local firmware, metadata and regression checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_verify_release.py'
+          python3 tests/verify_release.py
+      - name: Atomically publish only the Ventilation BIN and release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- Ventilation_ESP8266_V7_11.bin manifest-ventilation.txt tests/verify_release.py tests/test_verify_release.py
+          if git diff --cached --quiet; then
+            echo "Already published"
+          else
+            git commit -m 'Publish Ventilation v7.11 offline-first OTA (hardware unverified)'
+            git push origin HEAD:main
+          fi
+      - name: Verify public HTTPS manifest, complete BIN, and 206 byte ranges
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/verify_release.py --remote
