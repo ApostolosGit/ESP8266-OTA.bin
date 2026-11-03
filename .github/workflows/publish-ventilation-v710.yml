@@ -1,0 +1,174 @@
+name: Publish Ventilation v7.10 OTA for MQTT.app
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-ventilation-v710.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout OTA release repository
+        uses: actions/checkout@v4
+      - name: Checkout pinned diagnostic firmware source
+        uses: actions/checkout@v4
+        with:
+          repository: ApostolosGit/ESP8266
+          ref: 7c4ad70f6ef7c20ab915b9a305551922e59bc73d
+          path: source
+          persist-credentials: false
+      - name: Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+      - name: Install pinned ESP8266 core and required libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          INDEX_URL=https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index --additional-urls "$INDEX_URL"
+          arduino-cli core install "esp8266:esp8266@2.7.2" --additional-urls "$INDEX_URL"
+          arduino-cli lib install "OneWire"
+          arduino-cli lib install "DallasTemperature"
+          arduino-cli lib install "DHT sensor library"
+          mkdir -p "$HOME/Arduino/libraries"
+          git clone --quiet --depth 1 https://github.com/beegee-tokyo/DHTesp.git "$HOME/Arduino/libraries/DHTesp"
+          arduino-cli lib install "PubSubClient"
+      - name: Build exact candidate and validate OTA image
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE=source/Ventilation/ESP8266_ventilation_v7.10_breadcrumbs.ino
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path("source/Ventilation/ESP8266_ventilation_v7.10_breadcrumbs.ino").read_text()
+          required=(
+              '#define VERSION "7.10"',
+              '#define PLATFORM_VERSION "1.06"',
+              '#define OLED_TYPE 0',
+              '#define PLATFORM_LOCAL_CONTROL_APPLICATION 1',
+              '#define OTA_PROFILE_PREFIX "ventilation-3ds18b20-2dht11"',
+              '#define OTA_PROTOCOL_VERSION 2',
+              'void applicationPrepareOta()',
+              'applicationEarlyInitialize();',
+              'CrashTraceScope',
+              'CRASH_STAGE_MQTT_TLS_RETURN',
+              'maintainMqtt(now)',
+          )
+          for marker in required:
+              assert marker in s, f"Missing v7.10 invariant: {marker}"
+          old = dict(line.split('=',1) for line in Path('manifest-ventilation.txt').read_text().splitlines() if '=' in line)
+          assert old['version'] in ('7.09','7.10'), 'Unexpected previous Ventilation release'
+          assert old['profile']=='ventilation-3ds18b20-2dht11-none', 'OTA profile change'
+          assert old['file'] in ('Ventilation_ESP8266_V7_09.bin','Ventilation_ESP8266_V7_10.bin')
+          PY
+          mkdir -p "$RUNNER_TEMP/ESP8266_ventilation_v7_10_breadcrumbs" "$RUNNER_TEMP/compiled"
+          cp "$SOURCE" "$RUNNER_TEMP/ESP8266_ventilation_v7_10_breadcrumbs/ESP8266_ventilation_v7_10_breadcrumbs.ino"
+          arduino-cli compile \
+            --fqbn "esp8266:esp8266:nodemcuv2:eesz=4M2M" \
+            --additional-urls "https://arduino.esp8266.com/stable/package_esp8266com_index.json" \
+            --warnings all \
+            --output-dir "$RUNNER_TEMP/compiled" \
+            "$RUNNER_TEMP/ESP8266_ventilation_v7_10_breadcrumbs"
+          BIN="$RUNNER_TEMP/compiled/ESP8266_ventilation_v7_10_breadcrumbs.ino.bin"
+          test -s "$BIN"
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          d=Path('/home/runner/work/_temp/compiled/ESP8266_ventilation_v7_10_breadcrumbs.ino.bin')
+          assert d.exists(), 'Compiled file missing'
+          b=d.read_bytes()
+          assert b[0]==0xE9
+          assert len(b)==590368, f'Unexpected OTA size: {len(b)}'
+          assert hashlib.md5(b).hexdigest()=='9322553660abfe5f9c0892d48fb9e89d', 'Build MD5 differs from independently compiled candidate'
+          assert hashlib.sha256(b).hexdigest()=='8c03d8063d1c5819029c18467784e20620a2c85dc64206f082d10178ab1ade3f', 'Build SHA256 differs from independently compiled candidate'
+          dst=Path('Ventilation_ESP8266_V7_10.bin')
+          dst.write_bytes(b)
+          print('BIN_VERIFIED',dst,len(b),hashlib.sha256(b).hexdigest(),flush=True)
+          PY
+      - name: Write v7.10 manifest and update version-pinned release tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          src=Path('source/Ventilation/ESP8266_ventilation_v7.10_breadcrumbs.ino').read_bytes()
+          img=Path('Ventilation_ESP8266_V7_10.bin').read_bytes()
+          build='7c4ad70f6ef7c20ab915b9a305551922e59bc73d'
+          manifest={
+              'version':'7.10',
+              'file':'Ventilation_ESP8266_V7_10.bin',
+              'size':str(len(img)),
+              'md5':hashlib.md5(img).hexdigest(),
+              'meter':'VENTILATION',
+              'oled':'NONE',
+              'core':'ESP8266-2.7.2',
+              'channel':'PUBLIC_OTA',
+              'hardware_validation':'UNVERIFIED',
+              'sha256':hashlib.sha256(img).hexdigest(),
+              'source_sha256':hashlib.sha256(src).hexdigest(),
+              'build':build,
+              'application':'ventilation',
+              'platform_version':'1.06',
+              'driver':'DS18B20-DHT11',
+              'profile':'ventilation-3ds18b20-2dht11-none',
+              'ota_protocol':'2',
+              'transport':'https-range',
+              'credentials':'LittleFS-or-setup-portal',
+          }
+          Path('manifest-ventilation.txt').write_text(''.join(f'{k}={v}\n' for k,v in manifest.items()))
+          p=Path('tests/verify_release.py')
+          s=p.read_text()
+          def sub(old,new):
+              global s
+              assert s.count(old)==1, f'Verifier anchor not unique: {old}'
+              s=s.replace(old,new)
+          sub('VENTILATION_VERSION = "2.04"','VENTILATION_VERSION = "7.10"')
+          sub('fields["file"] == "Ventilation_ESP8266_V2_04.bin"','fields["file"] == "Ventilation_ESP8266_V7_10.bin"')
+          sub('"platform_version": "1.04", "driver": "DS18B20-DHT11"','"platform_version": "1.06", "driver": "DS18B20-DHT11"')
+          sub('"credentials": "LittleFS-migration-or-setup-portal",','"credentials": "LittleFS-or-setup-portal",')
+          sub('"hardware_validation": "UNVERIFIED", "requires": "Ventilation-1.04+",\n        "local_ip": "192.168.1.81",','"hardware_validation": "UNVERIFIED", "channel": "PUBLIC_OTA",')
+          p.write_text(s)
+          p=Path('tests/test_verify_release.py')
+          s=p.read_text()
+          def tsub(old,new):
+              global s
+              assert s.count(old)==1, f'Test anchor not unique: {old}'
+              s=s.replace(old,new)
+          tsub('"version": "2.02", "file": "Ventilation_ESP8266_V2_02.bin"','"version": "7.10", "file": "Ventilation_ESP8266_V7_10.bin"')
+          tsub('"platform_version": "1.03", "driver": "DS18B20-DHT11"','"platform_version": "1.06", "driver": "DS18B20-DHT11"')
+          tsub('"credentials": "LittleFS-migration-or-setup-portal",','"credentials": "LittleFS-or-setup-portal",')
+          tsub('"requires": "Ventilation-1.04+", "local_ip": "192.168.1.81",','"channel": "PUBLIC_OTA",')
+          tsub('("local_ip", "192.168.1.80"),','("channel", "TEST_OTA"),')
+          tsub('"Ventilation_ESP8266_V2_02_source.bin"','"Ventilation_ESP8266_V7_10_source.bin"')
+          p.write_text(s)
+          print('Manifest and validator updated for v7.10',flush=True)
+          PY
+      - name: Validate all existing profiles and new Ventilation BIN locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_verify_release.py'
+          python3 tests/verify_release.py
+      - name: Publish binary manifest and validator atomically
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- Ventilation_ESP8266_V7_10.bin manifest-ventilation.txt tests/verify_release.py tests/test_verify_release.py
+          if git diff --cached --quiet; then
+            echo 'Already published; no changes.'
+          else
+            git commit -m 'Publish Ventilation v7.10 diagnostic OTA BIN and manifest (hardware unverified)'
+            git push origin HEAD:main
+          fi
+      - name: Verify live GitHub HTTPS full image and 206 byte ranges
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/verify_release.py --remote
