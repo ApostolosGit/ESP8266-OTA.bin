@@ -1,0 +1,179 @@
+name: Publish Ventilation v7.13 CP1.07 OTA for MQTT.app
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-ventilation-v713.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout public OTA repository
+        uses: actions/checkout@v4
+      - name: Checkout exact successful v7.13 source commit
+        uses: actions/checkout@v4
+        with:
+          repository: ApostolosGit/ESP8266
+          ref: 31a78f8f2e71d376c8e3a862cd8920dcbe8133ed
+          path: source
+          persist-credentials: false
+      - name: Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+      - name: Install original ESP8266 core 2.7.2 and required libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          INDEX=https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index --additional-urls "$INDEX"
+          arduino-cli core install 'esp8266:esp8266@2.7.2' --additional-urls "$INDEX"
+          arduino-cli lib install OneWire
+          arduino-cli lib install DallasTemperature
+          arduino-cli lib install 'DHT sensor library'
+          mkdir -p "$HOME/Arduino/libraries"
+          git clone --quiet --depth=1 https://github.com/beegee-tokyo/DHTesp.git "$HOME/Arduino/libraries/DHTesp"
+          arduino-cli lib install PubSubClient
+      - name: Check exact hardware profile and watchdog recovery behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('source/Ventilation/ESP8266_ventilation_v7.13_watchdog_counter.ino').read_text()
+          required=(
+            '#define VERSION "7.13"',
+            '#define PLATFORM_VERSION "1.07"',
+            '#define OLED_TYPE 0',
+            '#define SITE_IP_D 81',
+            '#define OTA_PROFILE_PREFIX "ventilation-3ds18b20-2dht11"',
+            '#define OTA_PROTOCOL_VERSION 2',
+            '#define PLATFORM_LOCAL_CONTROL_APPLICATION 1',
+            'void applicationPrepareOta()',
+            'void applicationEarlyInitialize()',
+            'void applicationServiceLocal(unsigned long now)',
+            'ds.setWaitForConversion(false)',
+            'WiFi.setSleepMode(WIFI_NONE_SLEEP)',
+            'WDT_RECOVERY_LIMIT = 10UL',
+            'wdtRestartCount > WDT_RECOVERY_LIMIT',
+            'clearWdtCountForUserRestart();',
+            'CRASH_STAGE_VENT_DHT_OUTSIDE = 106',
+            'CRASH_STAGE_VENT_DHT_INSIDE = 107',
+            'digitalWrite(GPIO_FAN,FAN_OFF_LEVEL)',
+          )
+          for item in required:
+            assert item in s, 'Missing invariant: '+item
+          a=s.index('bool serviceNetworkStackRecovery(unsigned long now) {')
+          b=s.index('void serviceWiFiReconnect(unsigned long now) {',a)
+          for forbidden in ('WiFi.disconnect(', 'WiFi.mode(WIFI_OFF)', 'server.stop()', 'ESP.restart()'):
+            assert forbidden not in s[a:b], 'Broker error must not power off station: '+forbidden
+          current=dict(line.split('=',1) for line in Path('manifest-ventilation.txt').read_text().splitlines() if '=' in line)
+          assert current['version'] in ('7.11','7.13'), 'Unexpected active version'
+          assert current['file'] in ('Ventilation_ESP8266_V7_11.bin','Ventilation_ESP8266_V7_13.bin')
+          assert current['profile']=='ventilation-3ds18b20-2dht11-none'
+          assert current['ota_protocol']=='2' and current['oled']=='NONE'
+          print('VENTILATION_713_SOURCE_PROFILE_GUARD=PASS')
+          PY
+      - name: Compile exact candidate and compare SHA256/MD5 byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME=ESP8266_ventilation_v7_13_watchdog_counter
+          mkdir -p "$RUNNER_TEMP/$NAME" "$RUNNER_TEMP/compiled"
+          cp "source/Ventilation/ESP8266_ventilation_v7.13_watchdog_counter.ino" "$RUNNER_TEMP/$NAME/$NAME.ino"
+          arduino-cli compile \
+            --fqbn esp8266:esp8266:nodemcuv2:eesz=4M2M \
+            --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json \
+            --warnings all \
+            --output-dir "$RUNNER_TEMP/compiled" \
+            "$RUNNER_TEMP/$NAME"
+          python3 - <<'PY'
+          import hashlib,os
+          from pathlib import Path
+          image=Path(os.environ['RUNNER_TEMP'])/'compiled/ESP8266_ventilation_v7_13_watchdog_counter.ino.bin'
+          data=image.read_bytes()
+          assert data[:1]==b'\xe9', 'Invalid ESP8266 image header'
+          assert len(data)==593280, f'Unexpected size: {len(data)}'
+          assert hashlib.md5(data).hexdigest()=='450672edd9e8dd465e63a9e7f25d7fd9', 'Unexpected MD5'
+          assert hashlib.sha256(data).hexdigest()=='adb270d836cee19eaf034b955a4e7eddf4d9843143aafbe03be87e14d39d189b', 'Rebuilt BIN differs from approved artifact'
+          Path('Ventilation_ESP8266_V7_13.bin').write_bytes(data)
+          print('EXACT_V713_OTA_BINARY=PASS',len(data),hashlib.sha256(data).hexdigest())
+          PY
+      - name: Update manifest and release verifier for v7.13
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          image=Path('Ventilation_ESP8266_V7_13.bin').read_bytes()
+          src=Path('source/Ventilation/ESP8266_ventilation_v7.13_watchdog_counter.ino').read_bytes()
+          fields={
+            'version':'7.13',
+            'file':'Ventilation_ESP8266_V7_13.bin',
+            'size':str(len(image)),
+            'md5':hashlib.md5(image).hexdigest(),
+            'meter':'VENTILATION',
+            'oled':'NONE',
+            'core':'ESP8266-2.7.2',
+            'channel':'PUBLIC_OTA',
+            'hardware_validation':'UNVERIFIED',
+            'sha256':hashlib.sha256(image).hexdigest(),
+            'source_sha256':hashlib.sha256(src).hexdigest(),
+            'build':'31a78f8f2e71d376c8e3a862cd8920dcbe8133ed',
+            'application':'ventilation',
+            'platform_version':'1.07',
+            'driver':'DS18B20-DHT11',
+            'profile':'ventilation-3ds18b20-2dht11-none',
+            'ota_protocol':'2',
+            'transport':'https-range',
+            'credentials':'LittleFS-or-setup-portal',
+          }
+          Path('manifest-ventilation.txt').write_text(''.join(f'{k}={v}\n' for k,v in fields.items()))
+          for name in ('tests/verify_release.py','tests/test_verify_release.py'):
+            path=Path(name)
+            s=path.read_text()
+            changes=(
+              ('VENTILATION_VERSION = "7.11"', 'VENTILATION_VERSION = "7.13"'),
+              ('Ventilation_ESP8266_V7_11_source.bin', 'Ventilation_ESP8266_V7_13_source.bin'),
+              ('Ventilation_ESP8266_V7_11.bin', 'Ventilation_ESP8266_V7_13.bin'),
+              ('"version": "7.11"', '"version": "7.13"'),
+              ('"platform_version": "1.06"', '"platform_version": "1.07"'),
+            )
+            count=0
+            for before,after in changes:
+              if before in s:
+                s=s.replace(before,after)
+                count+=1
+            assert count>=2, f'{name}: release verifier was not upgraded'
+            assert 'Ventilation_ESP8266_V7_11.bin' not in s
+            path.write_text(s)
+          print('VENTILATION_713_MANIFEST_VALIDATOR=PASS')
+          PY
+      - name: Test all existing OTA profiles, including EnergyMeter
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_verify_release.py'
+          python3 tests/verify_release.py
+      - name: Commit only v7.13 BIN, manifest and release validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- Ventilation_ESP8266_V7_13.bin manifest-ventilation.txt tests/verify_release.py tests/test_verify_release.py
+          if git diff --cached --quiet; then
+            echo 'Nothing to publish'
+          else
+            git commit -m 'Publish Ventilation v7.13 CP1.07 OTA (hardware unverified)'
+            git push origin HEAD:main
+          fi
+      - name: Verify HTTPS live manifest, full image and three 206 ranges
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/verify_release.py --remote
